@@ -2,8 +2,6 @@
 
 ## This is my first small project on TON for the spring hackathon of 2024, let it be for history =)
 
-#
-
 ## Our platform is designed to stimulate:
 
     - doing business using the TON blockchain
