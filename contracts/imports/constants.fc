@@ -1,0 +1,49 @@
+const int TICKET_INDEX_SIZE = 64;
+const int OPERATION_CODE_SIZE = 32;
+const int MESSGAE_FLAGS_SIZE = 4;
+const int WORKCHAINT_SIZE = 8;
+const int CELL_HASH_SIZE = 256;
+const int DICT_TICKET_INDEX_SIZE = 64;
+const int HOW_MANY_SIZE = 16;
+const int BOOLEAN_FLAG_SIZE = 1;
+const int NUMBER_OF_CIRCLES_SIZE = 8;
+const int UINT_ADDRESS_SIZE = 256;
+const int TICKET_LEVEL_SIZE = 32;
+
+const int ONE = 1;
+const int ZERO = 0;
+
+const int TRUE = -1;
+const int FALSE = 0;
+
+const int MASTERCHAIN = -1;
+const int BASECHAIN = 0;
+
+const int CELL_BITS = 1023;
+const int CELL_REFS = 4;
+
+const int B_NB_SIZE = 6;
+const int BOUNCEABLE = 0x18; ;; 0b011000 tag - 0, ihr_disabled - 1, bounce - 1, bounced - 0, src = adr_none$00
+const int NON_BOUNCEABLE = 0x10; ;; 0b010000 tag - 0, ihr_disabled - 1, bounce - 0, bounced - 0, src = adr_none$00
+
+const int MSG_INFO_REST_BITS = 1 + 4 + 4 + 64 + 32;
+const int MSG_ONLY_BODY_SIZE = MSG_INFO_REST_BITS + 1 + 1;
+const int MSG_WITH_STATE_INIT_AND_BODY_SIZE = MSG_INFO_REST_BITS + 1 + 1 + 1;
+
+const int MSG_HAVE_STATE_INIT = 4;
+const int MSG_STATE_INIT_IN_REF = 2;
+const int MSG_BODY_IN_REF = 1;
+
+const int SEND_MODE_REGULAR = 0;
+const int SEND_MODE_PAY_FEES_SEPARATELY = 1;
+const int SEND_MODE_IGNORE_ERRORS = 2;
+const int SEND_MODE_DESTROY = 32;
+const int SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE = 64;
+const int SEND_MODE_CARRY_ALL_BALANCE = 128;
+const int SEND_MODE_BOUNCE_ON_ACTION_FAIL = 16;
+const int SEND_MODE_ESTIMATE_FEE_ONLY = 1024;
+
+const int BATCH_DEPLOY_THRESHOLD = 250;
+const int COINS_FOR_FEE = 30000000;
+
+const int MIN_TONS_FOR_STORGAE = 50000000;

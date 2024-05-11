@@ -1,0 +1,25 @@
+
+
+;; Ticket Assistant
+const int error::batch_out_of_range = 203;
+const int error::minter_is_not_deployed = 204;
+const int error::tickets_info_dict_is_empty = 205;
+const int error::minter_already_deployed = 206;
+const int error::ticket_index_already_added = 207;
+
+;; Ticket Minter
+const int error::no_such_ticket = 301;
+const int error::same_ticket_levels = 302;
+const int error::not_enough_money_to_update_the_ticket = 303;
+const int error::no_requested_tickets_left = 304;
+const int error::Not_sender's_ticket = 305;
+const int error::incorrect_ticket_index = 1000;
+
+;; Ticket
+const int error::no_a_collection_address = 405;
+
+;; Common
+const int error::not_an_owner_address = 424;
+const int error::not_an_owner_or_collection_address = 425;
+const int error::unknown_operation_code = 0xffff;
+

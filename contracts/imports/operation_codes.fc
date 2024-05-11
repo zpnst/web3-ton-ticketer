@@ -1,0 +1,23 @@
+
+
+;; Ticket Minter
+const int operation::mint_tickets = 0xaaaa;
+const int operation::update_my_ticket = 0xaaab;
+const int operation::buy_ticket = 0xaabb;
+
+;; Minter Assistant
+const int opeartion::smart_mint = 0xbbbb;
+const int operation::deploy_ticket_minter = 0xbbba;
+const int opeartion::internal_smart_mint = 0xbbaa;
+
+;; Ticket
+const int operation::update_ticket_content = 0xcccc;
+const int operation::transfer = 0x5fcc3d14;
+const int opeartion::ownership_assigned = 0x05138d91;
+const int opeartion::excesses = 0xd53276db;
+const int opeartion::report_static_data = 0x8b771735;
+const int opeartion::get_royalty_params = 0x693d3950;
+const int opeartion::report_royalty_params = 0xa8cb00ad;
+const int opeartion::edit_content = 0x1a0b9d51;
+const int opeartion::transfer_editorship = 0x1c04412a;
+const int opeartion::editorship_assigned = 0x511a4463;

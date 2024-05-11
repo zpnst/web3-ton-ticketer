@@ -1,0 +1,163 @@
+#include "imports/errors.fc";
+#include "imports/stdlib.fc";
+#include "imports/options.fc";
+#include "imports/constants.fc";
+#include "imports/operation_codes.fc";
+
+
+(int, int, slice, slice, cell, int, int, int) load_data() {
+    slice contract_storage = get_data().begin_parse();
+    (int index, slice collection_address) = (
+        contract_storage~load_uint(TICKET_INDEX_SIZE), 
+        contract_storage~load_msg_addr()
+        );
+    
+    if (contract_storage.slice_bits() > 0) {
+        return (
+            -1, 
+            index, 
+            collection_address, 
+            contract_storage~load_msg_addr(), ;; owner_address
+            contract_storage~load_ref(), ;; content
+            contract_storage~load_coins(), ;; ticket_price
+            contract_storage~load_uint(TICKET_LEVEL_SIZE), ;; ticket_level
+            contract_storage~load_int(BOOLEAN_FLAG_SIZE)
+        );
+    } else {  
+        return (
+            0, 
+            index, 
+            collection_address, 
+            null(), null(), null(), null(), null() ;; ticket not initialized yet
+        );
+    }
+}
+
+() store_data(int index, slice collection_address, slice owner_address, cell content, int ticket_price, int ticket_level, int sold?) impure {
+    set_data(
+        begin_cell()
+            .store_uint(index, TICKET_INDEX_SIZE)
+            .store_slice(collection_address)
+            .store_slice(owner_address)
+            .store_ref(content)
+            .store_coins(ticket_price)
+            .store_uint(ticket_level, TICKET_LEVEL_SIZE)
+            .store_int(sold?, BOOLEAN_FLAG_SIZE)
+        .end_cell()
+    );
+}
+
+() send_msg(slice to_address, int amount, int op, builder payload, int send_mode) impure inline {
+    var msg = begin_cell()
+        .store_uint(NON_BOUNCEABLE, B_NB_SIZE) ;; nobounce - int_msg_info$0 ihr_disabled:Bool bounce:Bool bounced:Bool src:MsgAddress -> 010000
+        .store_slice(to_address)
+        .store_coins(amount)
+        .store_uint(ZERO, MSG_ONLY_BODY_SIZE)
+        .store_uint(op, OPERATION_CODE_SIZE);
+
+    if (~ builder_null?(payload)) {
+        msg = msg.store_builder(payload);
+    }
+
+    send_raw_message(msg.end_cell(), send_mode);
+}
+
+() transfer_ownership(int my_balance, int index, slice collection_address, slice owner_address, cell content, slice in_msg_body, int fwd_fees, int ticket_price, int ticket_level) impure inline {
+    int sold? = in_msg_body~load_int(BOOLEAN_FLAG_SIZE);
+    slice new_owner_address = in_msg_body~load_msg_addr();
+    force_chain(new_owner_address);
+    slice response_destination = in_msg_body~load_msg_addr();
+    in_msg_body~load_int(BOOLEAN_FLAG_SIZE); ;; this nft don't use custom_payload
+    int forward_amount = in_msg_body~load_coins();
+    throw_unless(708, slice_bits(in_msg_body) >= 1);
+
+    int rest_amount = my_balance - MIN_TONS_FOR_STORGAE;
+    if (forward_amount) {
+        rest_amount -= (forward_amount + fwd_fees);
+    }
+    int need_response = response_destination.preload_uint(2) != 0; ;; if NOT addr_none: 00
+    if (need_response) {
+        rest_amount -= fwd_fees;
+    }
+
+    throw_unless(402, rest_amount >= 0); ;; base nft spends fixed amount of gas, will not check for response
+    
+    if (forward_amount) {
+        send_msg(new_owner_address, forward_amount, opeartion::ownership_assigned, 
+            begin_cell()
+                .store_slice(owner_address)
+                .store_coins(ticket_price)
+                .store_uint(ticket_level, TICKET_LEVEL_SIZE)
+                .store_slice(in_msg_body), SEND_MODE_PAY_FEES_SEPARATELY);  ;; paying fees, revert on errors
+    }
+    if (need_response) {
+        force_chain(response_destination);
+        send_msg(response_destination, rest_amount, opeartion::excesses, null(), 1); ;; paying fees, revert on errors
+    }
+
+    store_data(index, collection_address, new_owner_address, content, ticket_price, ticket_level, sold?);
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { ;; ignore empty messages
+        return ();
+    }
+
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(MESSGAE_FLAGS_SIZE);
+
+    if (flags & 1) { ;; ignore all bounced messages
+        return ();
+    }
+    slice sender_address = cs~load_msg_addr();
+
+    cs~load_msg_addr(); ;; skip dst
+    cs~load_coins(); ;; skip value
+    cs~skip_bits(1); ;; skip extracurrency collection
+    cs~load_coins(); ;; skip ihr_fee
+    int fwd_fee = muldiv(cs~load_coins(), 3, 2); ;; we use message fwd_fee for estimation of forward_payload costs
+
+
+    (int init?, int index, slice collection_address, slice owner_address, cell content, int ticket_price, int ticket_level, int sold?) = load_data();
+    if (~ init?) {
+        throw_unless(error::no_a_collection_address, equal_slices(collection_address, sender_address));
+        store_data(index, collection_address, in_msg_body~load_msg_addr(), in_msg_body~load_ref(), in_msg_body~load_coins(), in_msg_body~load_uint(TICKET_LEVEL_SIZE), in_msg_body~load_int(1));
+
+        return ();
+    }
+
+    int operation_code = in_msg_body~load_uint(OPERATION_CODE_SIZE);
+
+    if (operation_code == operation::transfer) {
+        throw_unless(error::not_an_owner_address, equal_slices(sender_address, owner_address));
+        transfer_ownership(my_balance, index, collection_address, owner_address, content, in_msg_body, fwd_fee, ticket_price, ticket_level);
+        return ();
+    }
+
+    if (operation_code == operation::update_ticket_content) {
+        throw_unless(error::not_an_owner_or_collection_address, equal_slices(owner_address, sender_address) | equal_slices(collection_address, sender_address));
+        store_data(index, collection_address, owner_address, 
+            in_msg_body~load_ref(), ;; new_ticket_content
+            in_msg_body~load_coins(), ;; new_ticket_price
+            in_msg_body~load_uint(TICKET_LEVEL_SIZE), ;; new_ticket_level
+            sold?
+        );
+        return ();
+    }
+
+    throw(error::unknown_operation_code);
+}
+
+;;
+;;  GET Methods
+;;
+
+(int, int, slice, slice, cell) get_nft_data() method_id {
+    (int init?, int index, slice collection_address, slice owner_address, cell content, _, _, _) = load_data();
+    return (init?, index, collection_address, owner_address, content);
+}
+
+(int, int, slice, slice, cell, int, int, int) get_full_ticket_data() method_id {
+    (int init?, int index, slice collection_address, slice owner_address, cell content, int ticket_price, int ticket_level, int sold?) = load_data();
+    return (init?, index, collection_address, owner_address, content, ticket_price, ticket_level, sold?);
+}

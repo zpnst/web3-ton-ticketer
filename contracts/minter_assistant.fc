@@ -1,0 +1,301 @@
+
+#include "imports/errors.fc";
+#include "imports/stdlib.fc";
+#include "imports/options.fc";
+#include "imports/constants.fc";
+#include "imports/operation_codes.fc";
+
+global int global::next_ticket_index;
+global slice global::ticket_minter_address;
+
+global int global::ticket::deploy_amount;
+
+() set_storage(slice owner_address, cell minter_content, cell ticket_code, cell tiket_minter_code, cell tickets_content_dict, int minter_deployed?) impure inline {
+    set_data(
+        begin_cell()
+            .store_slice(global::ticket_minter_address)
+            .store_uint(global::next_ticket_index, TICKET_INDEX_SIZE)
+            .store_slice(owner_address)
+            .store_ref(minter_content)
+            .store_ref(ticket_code)
+            .store_ref(tiket_minter_code)
+            .store_dict(tickets_content_dict)
+            .store_int(minter_deployed?, BOOLEAN_FLAG_SIZE)
+        .end_cell()
+    );
+}
+
+(slice, cell, cell, cell, cell, int) load_storage() inline {
+    slice minter_storage = get_data().begin_parse();
+    global::ticket_minter_address = minter_storage~load_msg_addr();
+    global::next_ticket_index = minter_storage~load_uint(TICKET_INDEX_SIZE);
+
+    return (
+        minter_storage~load_msg_addr(), ;; owner_address
+        minter_storage~load_ref(), ;; minter_content
+        minter_storage~load_ref(), ;; ticket_code
+        minter_storage~load_ref(), ;; tiket_minter_code
+        minter_storage~load_dict(), ;; tickets_content_dict
+        minter_storage~load_int(BOOLEAN_FLAG_SIZE) ;; minter_deployed?
+    );
+}
+
+cell calculate_ticket_minter_state_init(cell minter_content, cell ticket_code, cell tiket_minter_code) {
+  cell data = 
+        begin_cell()
+            .store_slice(my_address()) ;; owner of ticket_minter --> ticket_assistant
+            .store_uint(global::next_ticket_index, TICKET_INDEX_SIZE)
+            .store_ref(minter_content)
+            .store_ref(ticket_code)
+        .end_cell();
+
+  return (
+        begin_cell()
+            .store_uint(0, 2)
+            .store_dict(tiket_minter_code)
+            .store_dict(data)
+            .store_uint(0, 1)
+        .end_cell()
+    );
+}
+
+slice calculate_ticket_minter_address(cell state_init) {
+  return (
+        begin_cell()
+            .store_uint(4, 3)
+            .store_int(BASECHAIN, WORKCHAINT_SIZE)
+            .store_uint(cell_hash(state_init), CELL_HASH_SIZE)
+        .end_cell().begin_parse()
+        );
+}
+
+() deploy_ticket_minter(cell minter_content, cell ticket_code, cell tiket_minter_code, int deploy_amount) impure {
+                            
+    cell state_init = calculate_ticket_minter_state_init(minter_content, ticket_code, tiket_minter_code);
+    global::ticket_minter_address = calculate_ticket_minter_address(state_init);
+    builder message = 
+            begin_cell()
+                .store_uint(BOUNCEABLE, B_NB_SIZE)
+                .store_slice(global::ticket_minter_address)
+                .store_coins(deploy_amount)
+                .store_uint(MSG_HAVE_STATE_INIT + MSG_STATE_INIT_IN_REF, MSG_WITH_STATE_INIT_AND_BODY_SIZE)
+                .store_ref(state_init);
+
+    send_raw_message(message.end_cell(), SEND_MODE_PAY_FEES_SEPARATELY);
+}
+
+(int, int, int, cell) unpack_ticket_data(slice ticket_data) inline {
+    return (
+        ticket_data~load_coins(), ;; ticket_price
+        ticket_data~load_uint(HOW_MANY_SIZE), ;; how_many
+        ticket_data~load_uint(TICKET_LEVEL_SIZE), ;; ticket_level
+        ticket_data~load_ref() ;; ticket_content
+    );
+}
+
+(int, int) calculate_number_of_circles(int how_many) inline {
+    (int quotient, int remainder) = divmod(how_many, BATCH_DEPLOY_THRESHOLD);
+
+    if (quotient < 1) { ;; one circle
+        return (
+            1,
+            remainder
+        );
+    }
+
+    if (remainder == 0) { ;; an integer number of circles
+        return (
+            quotient,
+            remainder
+        );
+    }
+    else { ;; not an integer number of circles
+        return (
+            (quotient + 1),
+            remainder
+        );
+    }
+}
+
+() send_smart_batch_mint_message(cell deploy_list) impure {
+
+    builder message =
+        begin_cell()
+            .store_uint(BOUNCEABLE, B_NB_SIZE)
+            .store_slice(global::ticket_minter_address)
+            .store_coins(COINS_FOR_FEE)
+            .store_uint(ZERO, MSG_ONLY_BODY_SIZE)
+            .store_uint(operation::mint_tickets, OPERATION_CODE_SIZE)
+            .store_dict(deploy_list)
+            .store_coins(global::ticket::deploy_amount);
+
+    send_raw_message(message.end_cell(), SEND_MODE_PAY_FEES_SEPARATELY);
+}
+
+() send_smart_internal_batch_mint_message(int number_of_circles, int ticket_price, int ticket_level, cell ticket_content) impure {
+
+    builder message =
+        begin_cell()
+            .store_uint(BOUNCEABLE, B_NB_SIZE)
+            .store_slice(my_address())
+            .store_coins(ZERO)
+            .store_uint(ZERO, MSG_ONLY_BODY_SIZE)
+            .store_uint(opeartion::internal_smart_mint, OPERATION_CODE_SIZE)
+            .store_uint(number_of_circles, NUMBER_OF_CIRCLES_SIZE)
+            .store_coins(ticket_price)
+            .store_uint(ticket_level, TICKET_LEVEL_SIZE)
+            .store_ref(ticket_content);
+        
+    send_raw_message(message.end_cell(), SEND_MODE_PAY_FEES_SEPARATELY);
+}
+
+() execute_smart_batch_mint(int number_of_circles, int remainder_number_of_tickets, int ticket_price, int ticket_level, cell ticket_content, int internal?) impure {
+
+    int circles_counter = 0;
+    repeat(number_of_circles) { ;; number_of_circles times =)
+
+        cell deploy_list = new_dict();
+
+        if ((internal? == FALSE) & (circles_counter == number_of_circles - 1)) { ;; last => remainder_number_of_tickets
+
+            repeat(remainder_number_of_tickets) {
+                (deploy_list, int added?) = udict_add_builder?(deploy_list, TICKET_INDEX_SIZE, global::next_ticket_index - 1, 
+                    begin_cell()
+                        .store_ref(
+                            begin_cell()
+                                .store_slice(global::ticket_minter_address)
+                                .store_ref(ticket_content)
+                                .store_coins(ticket_price)
+                                .store_uint(ticket_level, TICKET_LEVEL_SIZE)
+                                .store_int(FALSE, BOOLEAN_FLAG_SIZE) ;; sold? not yet
+                            .end_cell()
+                        )
+
+                );
+                throw_unless(error::ticket_index_already_added, added?);
+                global::next_ticket_index += 1;
+            }
+
+            send_smart_batch_mint_message(deploy_list);
+        }
+        else {
+
+            repeat(BATCH_DEPLOY_THRESHOLD) { ;; internal circles always go here =)
+                (deploy_list, int added?) = udict_add_builder?(deploy_list, TICKET_INDEX_SIZE, global::next_ticket_index - 1, 
+                    begin_cell()
+                        .store_ref(
+                            begin_cell()
+                                .store_slice(global::ticket_minter_address)
+                                .store_ref(ticket_content)
+                                .store_coins(ticket_price)
+                                .store_uint(ticket_level, TICKET_LEVEL_SIZE)
+                                .store_int(FALSE, BOOLEAN_FLAG_SIZE) ;; sold? not yet
+                            .end_cell()
+                        )
+                );
+                throw_unless(error::ticket_index_already_added, added?);
+                global::next_ticket_index += 1;
+            }
+            send_smart_batch_mint_message(deploy_list);
+        }
+        circles_counter += 1;
+    }
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { ;; ignore empty messages
+        return ();
+    }
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(MESSGAE_FLAGS_SIZE);
+
+    if (flags & 1) { ;; ignore all bounced messages
+        return ();
+    }
+    slice sender_address = cs~load_msg_addr();
+
+    int operation_code = in_msg_body~load_uint(OPERATION_CODE_SIZE);
+
+    (slice owner_address, cell minter_content, cell ticket_code, cell tiket_minter_code, cell tickets_content_dict, int minter_deployed?) = load_storage();
+
+    if (operation_code == operation::deploy_ticket_minter) {
+
+        throw_unless(error::minter_already_deployed, ~ minter_deployed?);
+        throw_unless(error::not_an_owner_address, equal_slices(sender_address, owner_address));
+
+        deploy_ticket_minter(
+            minter_content,
+            ticket_code,
+            tiket_minter_code, 
+            in_msg_body~load_coins() ;; deploy_amount
+        );
+
+        minter_deployed? = TRUE;
+        set_storage(owner_address, minter_content, ticket_code, tiket_minter_code, tickets_content_dict, minter_deployed?);
+        return ();
+    }
+
+    if (operation_code == opeartion::smart_mint) {
+        
+        accept_message();
+        
+        throw_unless(error::minter_is_not_deployed, minter_deployed?);
+        throw_unless(error::not_an_owner_address, equal_slices(sender_address, owner_address));
+
+        global::ticket::deploy_amount = in_msg_body~load_coins();
+        
+        int ticket_index = -1;
+        throw_if(error::tickets_info_dict_is_empty, tickets_content_dict.dict_empty?());
+
+        do {
+            (ticket_index, slice ticket_of_current_type_data, int found?) = udict_get_next?(tickets_content_dict, DICT_TICKET_INDEX_SIZE, ticket_index);
+            if (found?) {
+                (int ticket_price, int how_many, int ticket_level, cell ticket_content) = unpack_ticket_data(ticket_of_current_type_data);
+                (int number_of_circles, int remainder_number_of_tickets) = calculate_number_of_circles(how_many);
+
+                if (number_of_circles >= 251) {
+                    (int transactions_number, int remainder_number_of_circles) = calculate_number_of_circles(number_of_circles);
+                    int counter = 0;
+                    repeat(transactions_number) { ;; transactions_number times =)
+                        
+                        if (counter == transactions_number - 1) { ;; last => remainder_number_of_circles
+                            send_smart_internal_batch_mint_message(remainder_number_of_circles, ticket_price, ticket_level, ticket_content);
+                        }
+                        else {
+                            send_smart_internal_batch_mint_message(BATCH_DEPLOY_THRESHOLD, ticket_price, ticket_level, ticket_content);
+                        }
+                        counter += 1;
+                    }
+                    execute_smart_batch_mint(ONE, remainder_number_of_tickets, ticket_price, ticket_level, ticket_content, FALSE);
+                }
+
+                else {
+                    execute_smart_batch_mint(number_of_circles, remainder_number_of_tickets, ticket_price, ticket_level, ticket_content, FALSE);
+                }
+
+            }
+        } until(~ found?);
+
+        set_storage(owner_address, minter_content, ticket_code, tiket_minter_code, tickets_content_dict, minter_deployed?);
+        return ();
+    }
+
+    if (operation_code == opeartion::internal_smart_mint) {
+
+        int number_of_circles = in_msg_body~load_uint(NUMBER_OF_CIRCLES_SIZE);
+        execute_smart_batch_mint(
+                number_of_circles, 
+                ZERO, 
+                in_msg_body~load_coins(), ;; ticket_price
+                in_msg_body~load_uint(TICKET_LEVEL_SIZE), ;; ticket_level
+                in_msg_body~load_ref(), ;; ticket_content
+                TRUE ;; internal?
+        );
+
+        set_storage(owner_address, minter_content, ticket_code, tiket_minter_code, tickets_content_dict, minter_deployed?);
+
+        return ();
+    }
+
+    throw(error::unknown_operation_code);
+}

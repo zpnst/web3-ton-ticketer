@@ -1,0 +1,322 @@
+
+#include "imports/errors.fc";
+#include "imports/stdlib.fc";
+#include "imports/options.fc";
+#include "imports/constants.fc";
+#include "imports/operation_codes.fc";
+
+
+() set_storage(slice owner_address, int next_ticket_index, 
+               cell minter_content, cell ticket_code, cell tickets_table) impure inline {
+    set_data(
+        begin_cell()
+            .store_slice(owner_address)
+            .store_uint(next_ticket_index, TICKET_INDEX_SIZE) ;; 1 => starts with 0!
+            .store_ref(minter_content)
+            .store_ref(ticket_code)
+            .store_dict(tickets_table)
+        .end_cell()
+    );
+}
+
+(slice, int, cell, cell, cell) load_storage() inline {
+    slice minter_storage = get_data().begin_parse();
+
+    slice owner_address = minter_storage~load_msg_addr();
+    int next_ticket_index = minter_storage~load_uint(TICKET_INDEX_SIZE);
+    cell minter_content = minter_storage~load_ref();
+    cell ticket_code = minter_storage~load_ref();
+    
+    if (minter_storage.slice_empty?()) {
+        return (
+            owner_address,
+            next_ticket_index,
+            minter_content,
+            ticket_code,
+            new_dict()
+        );
+    }
+    else {
+        return (
+            owner_address,
+            next_ticket_index,
+            minter_content,
+            ticket_code,
+            minter_storage~load_dict()
+        );
+    }
+}
+
+cell calculate_ticket_state_init(int ticket_index, cell ticket_code) {
+  cell data = 
+        begin_cell()
+            .store_uint(ticket_index, TICKET_INDEX_SIZE)
+            .store_slice(my_address()) ;; owner of ticket --> ticket_minter
+        .end_cell();
+
+  return (
+        begin_cell()
+            .store_uint(0, 2)
+            .store_dict(ticket_code)
+            .store_dict(data)
+            .store_uint(0, 1)
+        .end_cell()
+    );
+}
+
+slice calculate_ticket_address(cell state_init) {
+  return (
+        begin_cell()
+            .store_uint(4, 3)
+            .store_int(BASECHAIN, WORKCHAINT_SIZE)
+            .store_uint(cell_hash(state_init), CELL_HASH_SIZE)
+        .end_cell().begin_parse()
+        );
+}
+
+slice deploy_ticket(cell ticket_code, int deploy_amount, cell ticket_data, int ticket_index) impure {
+                            
+    cell state_init = calculate_ticket_state_init(ticket_index, ticket_code);
+    slice ticket_address = calculate_ticket_address(state_init);
+    builder message = 
+            begin_cell()
+                .store_uint(BOUNCEABLE, B_NB_SIZE)
+                .store_slice(ticket_address)
+                .store_coins(deploy_amount)
+                .store_uint(MSG_HAVE_STATE_INIT + MSG_STATE_INIT_IN_REF + MSG_BODY_IN_REF, MSG_WITH_STATE_INIT_AND_BODY_SIZE)
+                .store_ref(state_init)
+                .store_ref(ticket_data);
+    send_raw_message(message.end_cell(), SEND_MODE_PAY_FEES_SEPARATELY); ;; pay transfer fees separately, revert on errors
+    return ticket_address;
+}
+
+(slice, cell, int, int, int) unpack_ticket_data(slice ticket_data) inline {
+    return (
+        ticket_data~load_msg_addr(), ;; owner_address(my_address())
+        ticket_data~load_ref(), ;; current_ticket_content
+        ticket_data~load_coins(), ;; current_ticket_price
+        ticket_data~load_uint(TICKET_LEVEL_SIZE), ;; current_ticket_level
+        ticket_data~load_int(BOOLEAN_FLAG_SIZE) ;; sold?
+    );
+}
+
+slice calculate_ticket_address_by_uint(int uint_address) {
+  return (
+        begin_cell()
+            .store_uint(2, 2)
+            .store_uint(0, 1)
+            .store_int(BASECHAIN, WORKCHAINT_SIZE)
+            .store_uint(uint_address, CELL_HASH_SIZE)
+        .end_cell().begin_parse()
+        );
+}
+
+() send_ticket_update_message(slice to_ticket_address, cell new_ticket_content, int new_ticket_price, int new_ticket_level) impure {
+
+    builder message =
+        begin_cell()
+            .store_uint(BOUNCEABLE, B_NB_SIZE)
+            .store_slice(to_ticket_address)
+            .store_coins(COINS_FOR_FEE)
+            .store_uint(ZERO, MSG_ONLY_BODY_SIZE)
+            .store_uint(operation::update_ticket_content, OPERATION_CODE_SIZE)
+            .store_ref(new_ticket_content)
+            .store_coins(new_ticket_price)
+            .store_uint(new_ticket_level, TICKET_LEVEL_SIZE);
+
+    send_raw_message(message.end_cell(), SEND_MODE_PAY_FEES_SEPARATELY);
+}
+
+() send_ticket_buy_message(slice to_ticket_address, slice new_owner_address) impure {
+
+    builder message =
+        begin_cell()
+            .store_uint(BOUNCEABLE, B_NB_SIZE)
+            .store_slice(to_ticket_address)
+            .store_coins(COINS_FOR_FEE)
+            .store_uint(ZERO, MSG_ONLY_BODY_SIZE)
+            .store_uint(operation::transfer, OPERATION_CODE_SIZE)
+            .store_int(TRUE, BOOLEAN_FLAG_SIZE)
+            .store_slice(new_owner_address)
+            .store_slice(address_none())
+            .store_int(FALSE, 1)
+            .store_coins(ZERO)
+            .store_int(FALSE, 1);
+
+    send_raw_message(message.end_cell(), SEND_MODE_PAY_FEES_SEPARATELY);
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { ;; ignore empty messages
+        return ();
+    }
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(MESSGAE_FLAGS_SIZE);
+
+    if (flags & 1) { ;; ignore all bounced messages
+        return ();
+    }
+    slice sender_address = cs~load_msg_addr();
+
+    int operation_code = in_msg_body~load_uint(OPERATION_CODE_SIZE);
+
+    (slice owner_address, int next_ticket_index, cell minter_content, cell ticket_code, cell tickets_table) = load_storage();
+
+    if (operation_code == operation::buy_ticket) {
+        
+        int wished_ticket_level = in_msg_body~load_uint(TICKET_LEVEL_SIZE);
+
+        int wished_ticket_price = -1;
+        int uint_wished_ticket_address = -1;
+        cell wished_ticket_content = null();
+
+        int success? = TRUE;
+        int current_pivot = -1;
+        do {
+            (current_pivot, slice iter_ticket_data, success?) = udict_get_next?(tickets_table, UINT_ADDRESS_SIZE, current_pivot);
+
+                if (success?) {
+                    (slice iter_owner_address, cell iter_ticket_content, int iter_ticket_price, int iter_ticket_level, int sold?) = unpack_ticket_data(iter_ticket_data);
+                    if ((iter_ticket_level == wished_ticket_level) & (sold? == FALSE)) {
+                        uint_wished_ticket_address = current_pivot;
+                        wished_ticket_price = iter_ticket_price;
+                        wished_ticket_content = iter_ticket_content;
+                        success? = FALSE;
+                    }
+                }
+
+            } until (~ success?);
+
+        throw_if(error::no_requested_tickets_left, uint_wished_ticket_address == -1);
+        throw_unless(error::not_enough_money_to_update_the_ticket, msg_value - COINS_FOR_FEE >= wished_ticket_price);
+
+        slice wished_ticket_address = calculate_ticket_address_by_uint(uint_wished_ticket_address);
+        send_ticket_buy_message(wished_ticket_address, sender_address);
+        
+        ;; Now the ticket is sold out
+        tickets_table~udict_set_builder(UINT_ADDRESS_SIZE, uint_wished_ticket_address, 
+             begin_cell()
+                .store_slice(sender_address)
+                .store_ref(wished_ticket_content)
+                .store_coins(wished_ticket_price)
+                .store_uint(wished_ticket_level, TICKET_LEVEL_SIZE)
+                .store_int(TRUE, BOOLEAN_FLAG_SIZE)
+        );
+        
+        set_storage(owner_address, next_ticket_index, minter_content, ticket_code, tickets_table);
+        return ();
+    }
+
+    if (operation_code == operation::update_my_ticket) {
+
+        slice current_ticket_address = in_msg_body~load_msg_addr();
+        int wished_ticket_level = in_msg_body~load_uint(TICKET_LEVEL_SIZE);
+
+        (_, int uint_current_ticket_address) = parse_std_addr(current_ticket_address);
+
+        (slice current_ticket_info, int exist?) = udict_get?(tickets_table, UINT_ADDRESS_SIZE, uint_current_ticket_address);
+        throw_unless(error::no_such_ticket, exist?);
+
+        (slice current_owner_address, cell current_ticket_content, int current_ticket_price, int current_ticket_level, int sold?) = unpack_ticket_data(current_ticket_info);
+        throw_if(error::same_ticket_levels, current_ticket_level == wished_ticket_level);
+        throw_unless(error::Not_sender's_ticket, equal_slices(current_owner_address , sender_address));
+
+        int wished_ticket_price = -1;
+        cell wished_ticket_content = null();
+        slice wished_ticket_address = address_none();
+        
+        int success? = TRUE;
+        int current_pivot = -1;
+        do {
+            (current_pivot, slice iter_ticket_data, success?) = udict_get_next?(tickets_table, UINT_ADDRESS_SIZE, current_pivot);
+
+                if (success?) {
+                    (_, cell iter_ticket_content, int iter_ticket_price, int iter_ticket_level, int sold?) = unpack_ticket_data(iter_ticket_data);
+                    if ((iter_ticket_level == wished_ticket_level) & (sold? == FALSE)) {
+                        wished_ticket_content = iter_ticket_content;
+                        wished_ticket_address = calculate_ticket_address_by_uint(current_pivot);
+                        wished_ticket_price = iter_ticket_price;
+                        success? = FALSE;
+                    }
+                }
+
+            } until (~ success?);
+
+        throw_if(error::no_requested_tickets_left, wished_ticket_price == -1);
+
+        int need_to_pay_extra = wished_ticket_price - current_ticket_price; 
+        throw_unless(error::not_enough_money_to_update_the_ticket, msg_value - COINS_FOR_FEE >= need_to_pay_extra);
+
+        send_ticket_update_message(current_ticket_address, wished_ticket_content, wished_ticket_price, wished_ticket_level);
+        send_ticket_update_message(wished_ticket_address, current_ticket_content, current_ticket_price, current_ticket_level);
+
+        set_storage(owner_address, next_ticket_index, minter_content, ticket_code, tickets_table);
+        return();
+    }
+
+    if (operation_code == operation::mint_tickets) {
+
+        throw_unless(error::not_an_owner_address, equal_slices(sender_address, owner_address));
+
+        accept_message();
+        
+        int error_counter = 0;
+        int ticket_index_pivot = -1;
+        cell deploy_list = in_msg_body~load_dict();
+        int deploy_amount = in_msg_body~load_coins();
+
+        do {
+            (ticket_index_pivot, slice ticket_data, int success?) = udict_get_next?(deploy_list, TICKET_INDEX_SIZE, ticket_index_pivot);
+            if (success?) {
+                error_counter += 1;
+                if (error_counter >= BATCH_DEPLOY_THRESHOLD + 1) { ;; Limit due to limits of action list size
+                    throw(error::batch_out_of_range);
+                }
+                throw_unless(error::incorrect_ticket_index + error_counter, ticket_index_pivot == next_ticket_index - 1);
+
+                cell ticket_data_cell = ticket_data~load_ref();
+                slice ticket_address = deploy_ticket(
+                    ticket_code,
+                    deploy_amount, ;; deploy_amount
+                    ticket_data_cell, ;; ticket_data
+                    ticket_index_pivot
+                );
+                (_, int uint_ticket_address) = parse_std_addr(ticket_address);
+                slice ticket_data_cell_slice = ticket_data_cell.begin_parse();
+
+                (slice owner_address, cell iter_ticket_content, int iter_ticket_price, int iter_ticket_level, int sold?) = unpack_ticket_data(ticket_data_cell_slice);
+                tickets_table~udict_set_builder(UINT_ADDRESS_SIZE, uint_ticket_address, 
+                    begin_cell()
+                        .store_slice(owner_address)
+                        .store_ref(iter_ticket_content)
+                        .store_coins(iter_ticket_price)
+                        .store_uint(iter_ticket_level, TICKET_LEVEL_SIZE)
+                        .store_int(sold?, BOOLEAN_FLAG_SIZE)
+                );
+                next_ticket_index += 1;
+            }
+        } until ( ~ success?);
+
+        set_storage(owner_address, next_ticket_index, minter_content, ticket_code, tickets_table);
+
+        return ();
+    }
+
+    throw(error::unknown_operation_code);
+}
+
+
+(int, cell, slice) get_collection_data() method_id {
+    var (owner_address, next_item_index, content, _, _) = load_storage();
+    return (next_item_index, content, owner_address);
+}
+
+slice get_nft_address_by_index(int index) method_id {
+    var (_, _, _, nft_item_code, _) = load_storage();
+    cell state_init = calculate_ticket_state_init(index, nft_item_code);
+    return calculate_ticket_address(state_init);
+}
+
+cell get_nft_content(int index, cell individual_nft_content) method_id { 
+    return individual_nft_content;
+}
